@@ -24,36 +24,18 @@ const sum = arr => arr.reduce((a, p) => a + Number(p.amount || 0), 0);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /* ================= state ================= */
-const STORE_KEY = "retur-demo-v1";
-function sampleState() {
-  const t = today(), y = t.getFullYear(), m = t.getMonth();
-  const day = (offM, d) => iso(new Date(y, m + offM, Math.min(d, new Date(y, m + offM + 1, 0).getDate())));
-  const P = (store, offM, d, amount, category) => ({ id: uid(), store, date: day(offM, d), amount, category, sample: true });
-  const cur = [
-    P("Netto", 0, 1, 18, "Dagligvarer"), P("Rejsekort", 0, 2, 150, "Transport"), P("Føtex", 0, 3, 312.5, "Dagligvarer"),
-    P("Joe & The Juice", 0, 4, 69, "Mad ude"), P("H&M", 0, 5, 349, "Tøj"), P("Lidl", 0, 5, 186.75, "Dagligvarer"),
-  ].filter(p => parseISO(p.date) <= t);
-  const prev = [
-    P("Netto", -1, 2, 142, "Dagligvarer"), P("Rejsekort", -1, 3, 300, "Transport"), P("Normal", -1, 6, 89, "Andet"),
-    P("Rema 1000", -1, 9, 264.25, "Dagligvarer"), P("Biografen", -1, 12, 135, "Underholdning"), P("Zalando", -1, 14, 899, "Tøj"),
-    P("Føtex", -1, 17, 401, "Dagligvarer"), P("7-Eleven", -1, 19, 54, "Mad ude"), P("Matas", -1, 21, 179, "Sundhed"),
-    P("Lidl", -1, 24, 233.5, "Dagligvarer"), P("Sushi Shop", -1, 26, 289, "Mad ude"), P("Netto", -1, 28, 18, "Dagligvarer"),
-    P("DSB", -1, 29, 308.25, "Transport"),
-  ];
-  const S = (name, amount, d) => ({ id: uid(), name, amount, interval: "måned", day: d, remind: true, sample: true });
-  return {
-    salary: 12000, savingsGoal: 2000, pro: true,
-    ai: { month: ymKey(t), count: 0 },
-    purchases: [...cur, ...prev],
-    subs: [S("Netflix", 149, 1), S("iCloud+", 9, 3), S("Fitness World", 191, 5), S("Spotify", 119, 25)],
-    hasSample: true,
-  };
-}
+const STORE_KEY = "retur-v2";
+const freshState = () => ({
+  salary: 0, savingsGoal: 0, pro: false, proSince: null,
+  ai: { month: ymKey(today()), count: 0 },
+  purchases: [], subs: [],
+});
 let state;
 try { state = JSON.parse(localStorage.getItem(STORE_KEY) || "null"); } catch { state = null; }
-if (!state || !Array.isArray(state.purchases) || !Array.isArray(state.subs)) state = sampleState();
+if (!state || !Array.isArray(state.purchases) || !Array.isArray(state.subs)) state = freshState();
 function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch {} }
 
+checkProExpiry();
 let viewMonth = today(); viewMonth.setDate(1);
 let period = "måned";
 let chatTurns = [];
@@ -62,7 +44,40 @@ let flashId = null;
 
 /* ================= derived ================= */
 const subMonthly = s => s.interval === "år" ? s.amount / 12 : s.amount;
-const subsTotal = () => state.subs.reduce((a, s) => a + subMonthly(s), 0);
+const subActive = s => !s.endDate || today() < parseISO(s.endDate);
+const activeSubs = () => state.subs.filter(subActive);
+const subsTotal = () => activeSubs().reduce((a, s) => a + subMonthly(s), 0);
+const NOTICE = { ingen: "Ingen opsigelsesvarsel", lobende: "Løbende måned + 1", "1": "1 måned", "3": "3 måneder" };
+const addMonths = (d, n) => { const x = new Date(d.getFullYear(), d.getMonth() + n, 1); x.setDate(Math.min(d.getDate(), new Date(x.getFullYear(), x.getMonth() + 1, 0).getDate())); return x; };
+// Tidligst mulige ophør ud fra de vilkår brugeren har skrevet.
+function earliestEnd(s) {
+  const t = today();
+  let end;
+  if (s.notice === "lobende") end = new Date(t.getFullYear(), t.getMonth() + 2, 1);
+  else if (s.notice === "1") end = addMonths(t, 1);
+  else if (s.notice === "3") end = addMonths(t, 3);
+  else end = nextPayment(s);
+  if (s.bindUntil) { const b = parseISO(s.bindUntil); if (b > end) end = b; }
+  return end;
+}
+// Kendte udbyderes egne sider til opsigelse. Ukendte får en søgning.
+const CANCEL_LINKS = [
+  [/netflix/i, "https://www.netflix.com/cancelplan"],
+  [/spotify/i, "https://www.spotify.com/account/subscription/"],
+  [/youtube/i, "https://www.youtube.com/paid_memberships"],
+  [/disney/i, "https://www.disneyplus.com/account"],
+  [/icloud|apple/i, "https://apps.apple.com/account/subscriptions"],
+];
+const cancelLink = name => (CANCEL_LINKS.find(([re]) => re.test(name)) || [, null])[1];
+function proRenewal() {
+  const since = state.proSince ? parseISO(state.proSince) : today();
+  let d = addMonths(since, 1);
+  while (d <= today()) d = addMonths(d, 1);
+  return d;
+}
+function checkProExpiry() {
+  if (state.pro && state.proEnds && today() >= parseISO(state.proEnds)) { state.pro = false; state.proEnds = null; state.proSince = null; save(); }
+}
 function nextPayment(s) {
   const t = today();
   if (s.interval === "år" && s.nextDate) {
@@ -142,6 +157,7 @@ const I = {
   spark: s => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8zM19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></svg>`,
   x: s => svg('<path d="M6 6l12 12M18 6L6 18"/>', s, 2.2),
   check: s => svg('<path d="M5 12.5l4.5 4.5L19 7.5"/>', s, 2.6),
+  lock: s => svg('<rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>', s),
   bell: s => svg('<path d="M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15zM10 20a2 2 0 0 0 4 0"/>', s),
 };
 
@@ -226,35 +242,36 @@ function vOverblik() {
   if (subs) byCat["Abonnementer"] = subs;
   const cats = Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, 5);
   const catMax = Math.max(1, ...cats.map(c => c[1]));
-  const upcoming = [...state.subs].sort((a, b) => nextPayment(a) - nextPayment(b)).slice(0, 3);
+  const upcoming = activeSubs().sort((a, b) => nextPayment(a) - nextPayment(b)).slice(0, 3);
   const savePct = state.savingsGoal > 0 ? Math.max(0, Math.min(100, left / state.savingsGoal * 100)) : 0;
   return `
-  ${state.hasSample ? `<div class="banner"><span><b>Eksempeldata.</b> Tallene er opdigtede, så du kan prøve appen.</span><button class="link" data-act="clearSample">Ryd eksempeldata</button></div>` : ""}
+  ${state.salary <= 0 ? `<div class="banner"><span><b>Kom godt i gang.</b> Skriv din udbetalte løn, så kan Retur vise hvor meget du har tilbage.</span><button class="btn lime" data-act="settings">Indtast løn</button></div>` : ""}
   ${header("Dit overblik", "Køb og abonnementer samlet ét sted", monthSwitch())}
   <div class="grid kpis">
     <a class="card kpi hero" href="#kob">
       <div class="lbl"><span class="dot">${I.card(16)}</span>Forbrug i ${MONTHS[viewMonth.getMonth()].toLowerCase()}</div>
       <div class="val num" data-count="${total}" data-kind="kr">${kr(total)}</div>
-      ${state.pro ? `<div class="bar"><i data-w="${Math.min(100, pct)}"></i></div><div class="foot"><span class="num" data-count="${pct}" data-kind="pct">${pctf(pct)}</span> af din løn</div>` : `<div class="foot">Engangskøb og abonnementer</div>`}
+      ${state.pro && state.salary > 0 ? `<div class="bar"><i data-w="${Math.min(100, pct)}"></i></div><div class="foot"><span class="num" data-count="${pct}" data-kind="pct">${pctf(pct)}</span> af din løn</div>` : state.pro ? `<div class="foot">Indtast din løn for at se procent</div>` : `<div class="foot">Engangskøb og abonnementer</div>`}
     </a>
     <button class="card kpi" data-act="settings">
       <div class="lbl"><span class="dot">${I.wallet(16)}</span>Udbetalt løn</div>
       <div class="val num" data-count="${state.salary}" data-kind="kr">${kr(state.salary)}</div>
-      <div class="foot">Tryk for at ændre</div>
+      <div class="foot">${state.salary > 0 ? "Tryk for at ændre" : "Tryk for at indtaste"}</div>
     </button>
     <a class="card kpi" href="#abonnementer">
       <div class="lbl"><span class="dot">${I.repeat(16)}</span>Abonnementer</div>
       <div class="val num" data-count="${subs}" data-kind="kr">${kr(subs)}</div>
-      <div class="foot">${state.subs.length} aktive · ${kr(subs * 12)} om året</div>
+      <div class="foot">${activeSubs().length} aktive · ${kr(subs * 12)} om året</div>
     </a>
     ${state.pro ? `<button class="card kpi" data-act="settings">
       <div class="lbl"><span class="dot">${I.pig(16)}</span>Tilbage efter forbrug</div>
       <div class="val num" data-count="${left}" data-kind="kr">${kr(left)}</div>
       <div class="bar light"><i data-w="${savePct}"></i></div>
-      <div class="foot">${left >= state.savingsGoal ? `Du når dit sparemål på ${kr(state.savingsGoal)}` : left > 0 ? `${kr(state.savingsGoal - left)} fra sparemålet` : "Over din løn denne måned"}</div>
-    </button>` : `<button class="card kpi" data-act="settings">
-      <div class="lbl"><span class="dot">${I.spark(16)}</span>Retur Pro</div>
-      <div class="val">29 kr.</div><div class="foot">Sparemål, procent af løn og ubegrænset AI</div></button>`}
+      <div class="foot">${state.salary <= 0 ? "Indtast løn og sparemål" : state.savingsGoal <= 0 ? "Sæt et sparemål under indstillinger" : left >= state.savingsGoal ? `Du når dit sparemål på ${kr(state.savingsGoal)}` : left > 0 ? `${kr(state.savingsGoal - left)} fra sparemålet` : "Over din løn denne måned"}</div>
+    </button>` : `<button class="card kpi locked" data-act="upgrade">
+      <div class="lbl"><span class="dot">${I.lock(16)}</span>Tilbage efter forbrug</div>
+      <div class="val blur" aria-hidden="true">8.450 kr.</div>
+      <div class="foot"><span class="prolink">${I.spark(13)} Lås op med Pro</span></div></button>`}
   </div>
   <div class="grid cols">
     <div class="stack">
@@ -279,12 +296,13 @@ function vOverblik() {
       </section>
       <section class="card">
         <div class="card-h"><h2>Kommende betalinger</h2><a class="link" href="#abonnementer">Alle</a></div>
-        <div class="list">${upcoming.map((s, i) => { const d = nextPayment(s); return `<button class="row" style="--i:${i}" data-editsub="${s.id}"><span class="av">${initial(s.name)}</span><span class="grow"><div class="name">${esc(s.name)}</div><div class="meta">${whenText(d)}</div></span><span class="amt num">${kr(s.amount)}</span></button>`; }).join("") || emptyBox("Ingen abonnementer", "Tilføj dem med plusknappen.")}</div>
+        <div class="list">${upcoming.map((s, i) => { const d = nextPayment(s); return `<button class="row" style="--i:${i}" data-sub="${s.id}"><span class="av">${initial(s.name)}</span><span class="grow"><div class="name">${esc(s.name)}</div><div class="meta">${whenText(d)}</div></span><span class="amt num">${kr(s.amount)}</span></button>`; }).join("") || emptyBox("Ingen abonnementer", "Tilføj dem med plusknappen.")}</div>
       </section>
       <section class="card">
         <div class="card-h"><h2>Fordeling</h2></div>
         <div class="cats">${cats.map(([c, v]) => `<div class="cat"><div class="top"><span>${esc(c)}</span><span class="num">${kr(v)}</span></div><div class="bar light"><i data-w="${v / catMax * 100}"></i></div></div>`).join("") || `<div class="empty" style="padding:8px">Ingen data i denne måned.</div>`}</div>
       </section>
+      ${state.pro ? "" : `<section class="card adcard"><span class="adtag">Annonce</span><div><b>Her vises en annonce</b><span>Gratisversionen har reklamer. Pro er uden.</span></div><button class="link" data-act="upgrade">Fjern</button></section>`}
     </div>
   </div>`;
 }
@@ -327,22 +345,27 @@ function vKob() {
 }
 
 function vAbon() {
-  const subs = [...state.subs].sort((a, b) => nextPayment(a) - nextPayment(b));
+  const act = activeSubs().sort((a, b) => nextPayment(a) - nextPayment(b));
+  const ended = state.subs.filter(x => !subActive(x));
   const total = subsTotal();
+  const card = (s, i) => {
+    const d = nextPayment(s), n = daysUntil(d);
+    const status = s.endDate ? `<span class="when stop">Opsagt · ophører ${dkDate(s.endDate)}</span>` : `<span class="when ${n <= 3 ? "soon" : ""}">${I.bell(13)} ${whenText(d)}</span>`;
+    return `<button class="sub-card ${subActive(s) ? "" : "ended"}" style="--i:${i}" data-sub="${s.id}">
+      <div class="t"><span class="av">${initial(s.name)}</span><span style="flex:1;min-width:0"><div class="name" style="font-weight:700">${esc(s.name)}</div><div style="font-size:13px;color:var(--muted)">${s.interval === "år" ? "Årligt" : "Månedligt"}${s.bindUntil && parseISO(s.bindUntil) > today() ? ` · bundet til ${dkDate(s.bindUntil)}` : ""}</div></span>${I.right(18)}</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap"><span class="amt num">${kr(s.amount)}</span>${subActive(s) ? status : `<span class="when">Ophørt</span>`}</div>
+    </button>`;
+  };
   return `
-  ${header("Abonnementer", "Faste betalinger og hvornår de trækkes", `<button class="btn primary" data-act="addSub">${I.plus(16)} Nyt abonnement</button>`)}
+  ${header("Abonnementer", "Faste betalinger, vilkår og opsigelse", `<button class="btn primary" data-act="addSub">${I.plus(16)} Nyt abonnement</button>`)}
   <div class="grid kpis" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
-    <div class="card kpi hero"><div class="lbl"><span class="dot">${I.repeat(16)}</span>Pr. måned</div><div class="val num" data-count="${total}" data-kind="kr">${kr(total)}</div><div class="foot">${state.subs.length} aktive abonnementer</div></div>
+    <div class="card kpi hero"><div class="lbl"><span class="dot">${I.repeat(16)}</span>Pr. måned</div><div class="val num" data-count="${total}" data-kind="kr">${kr(total)}</div><div class="foot">${act.length} aktive abonnementer</div></div>
     <div class="card kpi"><div class="lbl"><span class="dot">${I.card(16)}</span>Pr. år</div><div class="val num" data-count="${total * 12}" data-kind="kr">${kr(total * 12)}</div><div class="foot">Hvis intet ændrer sig</div></div>
-    <div class="card kpi"><div class="lbl"><span class="dot">${I.bell(16)}</span>Næste betaling</div><div class="val">${subs[0] ? esc(subs[0].name) : "Ingen"}</div><div class="foot">${subs[0] ? `${whenText(nextPayment(subs[0]))} · ${kr(subs[0].amount)}` : "Tilføj dit første abonnement"}</div></div>
+    <div class="card kpi"><div class="lbl"><span class="dot">${I.bell(16)}</span>Næste betaling</div><div class="val">${act[0] ? esc(act[0].name) : "Ingen"}</div><div class="foot">${act[0] ? `${whenText(nextPayment(act[0]))} · ${kr(act[0].amount)}` : "Tilføj dit første abonnement"}</div></div>
   </div>
-  <h2 style="font-size:16px;margin:24px 0 12px">Alle abonnementer</h2>
-  <div class="subs">${subs.map((s, i) => { const d = nextPayment(s); const n = daysUntil(d);
-    return `<button class="sub-card" style="--i:${i}" data-editsub="${s.id}">
-      <div class="t"><span class="av">${initial(s.name)}</span><span style="flex:1;min-width:0"><div class="name" style="font-weight:700">${esc(s.name)}</div><div style="font-size:13px;color:var(--muted)">${s.interval === "år" ? "Årligt" : "Månedligt"}</div></span></div>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><span class="amt num">${kr(s.amount)}</span><span class="when ${n <= 3 ? "soon" : ""}">${I.bell(13)} ${whenText(d)}</span></div>
-    </button>`; }).join("") || `<div class="card">${emptyBox("Ingen abonnementer endnu", "Tilføj Netflix, Spotify eller fitness, så holder Retur øje med betalingerne.")}</div>`}</div>
-  ${subs.length ? `<p class="hint" style="text-align:left;margin-top:14px">Påmindelser dagen før en betaling kommer i den færdige app.</p>` : ""}`;
+  <h2 style="font-size:16px;margin:24px 0 12px">Aktive</h2>
+  <div class="subs">${act.map(card).join("") || `<div class="card">${emptyBox("Ingen abonnementer endnu", "Tilføj Netflix, Spotify eller fitness, så holder Retur øje med betalinger, binding og opsigelse.")}</div>`}</div>
+  ${ended.length ? `<h2 style="font-size:16px;margin:24px 0 12px">Ophørte</h2><div class="subs">${ended.map(card).join("")}</div>` : ""}`;
 }
 
 function vChat() {
@@ -362,7 +385,7 @@ function vChat() {
         <input id="chatIn" placeholder="Skriv en besked..." autocomplete="off" maxlength="600">
         <button class="send" aria-label="Send" ${chatBusy ? "disabled" : ""}>${I.send(18)}</button>
       </form>
-      <div class="quota" data-quota>${state.pro ? "Pro: ubegrænset AI" : `${left} af 5 AI-interaktioner tilbage denne måned`}</div>
+      <div class="quota" data-quota>${state.pro ? "Pro: ubegrænset AI" : `${left} af 5 AI-interaktioner tilbage denne måned · <button class="link" data-act="upgrade">Få ubegrænset med Pro</button>`}</div>
     </div>
   </section>`;
 }
@@ -383,8 +406,8 @@ function render() {
   $$("[data-tab]").forEach(a => a.dataset.tab === r ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
   $$("[data-pro]").forEach(b => b.hidden = !state.pro);
   $("[data-procard]").innerHTML = state.pro
-    ? `<b>Retur Pro</b><span class="muted">Ubegrænset AI og sparemål er slået til.</span>`
-    : `<b>Gratis</b><span class="muted">${aiLeft()} af 5 AI-interaktioner tilbage. Pro koster 29 kr. om måneden.</span>`;
+    ? `<b>Retur Pro</b><span class="muted">Ubegrænset AI, sparemål og ingen reklamer.</span>`
+    : `<b>Retur Gratis</b><span class="muted">${aiLeft()} af 5 AI-interaktioner tilbage denne måned.</span><button class="btn lime block" data-act="upgrade" style="margin-top:10px;padding:9px 12px;font-size:14px">${I.spark(14)} Opgrader til Pro</button>`;
   if (entering) {
     v.classList.remove("enter"); void v.offsetWidth; v.classList.add("enter");
     window.scrollTo({ top: 0 });
@@ -420,17 +443,18 @@ function animateIn(root, entering) {
 
 /* ================= global events ================= */
 document.addEventListener("click", e => {
-  const b = e.target.closest("[data-act],[data-edit],[data-editsub],[data-period],[data-sugg]");
+  const b = e.target.closest("[data-act],[data-edit],[data-editsub],[data-sub],[data-period],[data-sugg]");
   if (!b || b.closest("#sheetRoot")) return;
   const a = b.dataset.act;
   if (a === "add") openPlus();
   else if (a === "addSub") openForm({ mode: "new", data: { type: "sub", date: iso(today()), interval: "måned", category: "Abonnement" } });
   else if (a === "settings") openSettings();
-  else if (a === "clearSample") clearSample();
+  else if (a === "upgrade") openUpgrade();
   else if (a === "prevM") { viewMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() - 1, 1); render(); }
   else if (a === "nextM") { const n = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 1); if (n <= today()) { viewMonth = n; render(); } }
   else if (b.dataset.edit) { const p = state.purchases.find(x => x.id === b.dataset.edit); if (p) openForm({ mode: "edit", data: { ...p, type: "once" } }); }
-  else if (b.dataset.editsub) { const s = state.subs.find(x => x.id === b.dataset.editsub); if (s) openForm({ mode: "editsub", data: { id: s.id, store: s.name, amount: s.amount, type: "sub", interval: s.interval, date: iso(nextPayment(s)) } }); }
+  else if (b.dataset.sub) openSubDetail(b.dataset.sub);
+  else if (b.dataset.editsub) editSub(b.dataset.editsub);
   else if (b.dataset.period) { period = b.dataset.period; if (period === "måned") { viewMonth = today(); viewMonth.setDate(1); } render(); }
   else if (b.dataset.sugg) sendChat(b.dataset.sugg);
 });
@@ -451,7 +475,8 @@ function financeData() {
   const mk = d => { const ps = monthPurchases(d); return { maaned: `${MONTHS[d.getMonth()]} ${d.getFullYear()}`, engangskoeb_i_alt: r2(sum(ps)), pr_kategori: byCat(ps), koeb: ps.slice(0, 40).map(p => ({ butik: p.store, dato: p.date, beloeb: p.amount, kategori: p.category })) }; };
   return {
     dato_i_dag: iso(t), udbetalt_loen_pr_maaned: state.salary, sparemaal_pr_maaned: state.savingsGoal,
-    abonnementer: state.subs.map(s => ({ navn: s.name, beloeb: s.amount, interval: s.interval, naeste_betaling: iso(nextPayment(s)) })),
+    abonnementer: state.subs.map(s => ({ navn: s.name, beloeb: s.amount, interval: s.interval, aktiv: subActive(s), naeste_betaling: subActive(s) && !s.endDate ? iso(nextPayment(s)) : null, opsagt_ophoerer: s.endDate || null, bundet_til: s.bindUntil || null, opsigelsesvarsel: NOTICE[s.notice || "ingen"] })),
+    plan: state.pro ? "Retur Pro" : "Retur Gratis",
     abonnementer_pr_maaned_i_alt: r2(subsTotal()), denne_maaned: mk(cur), sidste_maaned: mk(prev),
   };
 }
@@ -469,7 +494,7 @@ async function sendChat(q) {
   chatTurns.push(user); appendChat(user);
   if (aiLeft() <= 0) {
     const t = { role: "assistant", content: "Du har brugt dine 5 gratis AI-interaktioner denne måned. Med Retur Pro får du ubegrænset AI for 29 kr. om måneden.", err: true };
-    chatTurns.push(t); appendChat(t); return;
+    chatTurns.push(t); appendChat(t); setTimeout(openUpgrade, 700); return;
   }
   const reply = { role: "assistant", content: "", pending: true };
   chatTurns.push(reply);
@@ -542,7 +567,7 @@ function openPlus() {
     el => el.addEventListener("click", e => {
       const b = e.target.closest("[data-pick]"); if (!b) return;
       if (b.dataset.pick === "manual") return openForm({ mode: "new", data: { type: "once", date: iso(today()), category: "Andet" } });
-      if (aiLeft() <= 0) return toast("Du har brugt dine 5 gratis AI-interaktioner. Opgrader til Pro.", false);
+      if (aiLeft() <= 0) return openUpgrade("Du har brugt dine 5 gratis AI-interaktioner denne måned.");
       (b.dataset.pick === "cam" ? $("#camInput") : $("#fileInput")).click();
     }));
 }
@@ -606,7 +631,15 @@ function openForm({ mode, data, fromAi, low }) {
         <label class="field ${ai}"><span id="fDateLbl">${t === "sub" ? "Næste betaling" : "Dato"}</span><input id="fDate" type="date" required value="${esc(data.date || iso(today()))}"></label>
       </div>
       <label class="field" id="catWrap" ${t === "sub" ? "hidden" : ""}><span>Kategori</span><select id="fCat">${CATS.filter(c => c !== "Abonnement").map(c => `<option ${c === data.category ? "selected" : ""}>${c}</option>`).join("")}</select></label>
-      <label class="field" id="intWrap" ${t === "sub" ? "" : "hidden"}><span>Interval</span><select id="fInt"><option value="måned" ${data.interval !== "år" ? "selected" : ""}>Månedligt</option><option value="år" ${data.interval === "år" ? "selected" : ""}>Årligt</option></select></label>
+      <div id="intWrap" class="form" ${t === "sub" ? "" : "hidden"}>
+        <label class="field"><span>Interval</span><select id="fInt"><option value="måned" ${data.interval !== "år" ? "selected" : ""}>Månedligt</option><option value="år" ${data.interval === "år" ? "selected" : ""}>Årligt</option></select></label>
+        <div class="terms-h">Betingelser <span>valgfrit</span></div>
+        <div class="two">
+          <label class="field"><span>Bundet til</span><input id="fBind" type="date" value="${esc(data.bindUntil || "")}"></label>
+          <label class="field"><span>Opsigelsesvarsel</span><select id="fNotice">${Object.entries(NOTICE).map(([k, l]) => `<option value="${k}" ${(data.notice || "ingen") === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+        </div>
+        <label class="field"><span>Note om vilkår</span><input id="fNote" maxlength="200" placeholder="Fx studierabat udløber i august" value="${esc(data.note || "")}"></label>
+      </div>
       <p id="fErr" class="err-text" hidden></p>
       <button class="btn primary block" type="submit" id="fSubmit">${mode === "new" ? (t === "sub" ? "Gem abonnement" : "Tilføj betaling") : "Gem ændringer"}</button>
       ${mode !== "new" ? `<button class="btn danger block" type="button" data-del>Slet</button>` : `<p class="hint" style="margin:0">Du kan rette alle felter</p>`}
@@ -633,7 +666,8 @@ function openForm({ mode, data, fromAi, low }) {
       await sleep(reduced ? 0 : 280);
       if (type === "sub") {
         const d = parseISO(date), interval = $("#fInt", el).value;
-        const rec = { id: data.id || uid(), name: store, amount, interval, day: d.getDate(), nextDate: date, remind: true };
+        const rec = { id: data.id || uid(), name: store, amount, interval, day: d.getDate(), nextDate: date, remind: true,
+          bindUntil: $("#fBind", el).value || null, notice: $("#fNotice", el).value, note: $("#fNote", el).value.trim() };
         if (isSubEdit) state.subs = state.subs.map(s => s.id === rec.id ? { ...s, ...rec } : s); else state.subs.push(rec);
         save(); closeSheet(); toast(isSubEdit ? "Abonnement gemt" : "Abonnement tilføjet");
         if (route() !== "abonnementer" && !isSubEdit) location.hash = "abonnementer"; else render();
@@ -654,39 +688,179 @@ function openForm({ mode, data, fromAi, low }) {
   });
 }
 
-function clearSample() {
-  state.purchases = state.purchases.filter(p => !p.sample); state.subs = state.subs.filter(s => !s.sample); state.hasSample = false;
-  chatTurns = []; save(); render(); toast("Eksempeldata ryddet");
-}
 function openSettings() {
+  const since = state.proSince ? dkDate(state.proSince) : "";
   sheet(`${head("Indstillinger")}
     <form id="setForm" class="form" novalidate>
       <div class="two">
-        <label class="field"><span>Udbetalt løn pr. måned</span><input id="sSal" class="num" inputmode="numeric" value="${state.salary}"></label>
-        <label class="field"><span>Sparemål pr. måned</span><input id="sGoal" class="num" inputmode="numeric" value="${state.savingsGoal}"></label>
+        <label class="field"><span>Udbetalt løn pr. måned</span><input id="sSal" class="num" inputmode="numeric" placeholder="Fx 12000" value="${state.salary || ""}"></label>
+        <label class="field"><span>Sparemål pr. måned</span><input id="sGoal" class="num" inputmode="numeric" placeholder="Fx 2000" value="${state.savingsGoal || ""}"></label>
       </div>
-      <div class="setrow"><span style="flex:1"><div style="font-weight:700">Retur Pro</div><div style="font-size:13px;color:var(--muted)">29 kr. om måneden. Ubegrænset AI, sparemål og løn i procent. Slå fra for at se gratisversionen.</div></span>
-        <label class="toggle"><input type="checkbox" id="sPro" ${state.pro ? "checked" : ""} aria-label="Retur Pro"><span></span></label></div>
+      <div class="setrow">
+        <span class="plan-ic ${state.pro ? "on" : ""}">${I.spark(18)}</span>
+        <span style="flex:1"><div style="font-weight:700">${state.pro ? "Retur Pro" : "Retur Gratis"}</div>
+        <div style="font-size:13px;color:var(--muted)">${state.pro ? (state.proEnds ? `Opsagt · Pro til ${dkDate(state.proEnds)}` : `29 kr. om måneden · fornyes ${dkDate(iso(proRenewal()))}`) : "5 AI-interaktioner om måneden, med reklamer"}</div></span>
+        ${state.pro ? (state.proEnds ? `<button class="btn lime" type="button" data-resume style="padding:9px 12px;font-size:14px">Genoptag</button>` : `<button class="btn ghost" type="button" data-cancel style="padding:9px 12px;font-size:14px">Opsig</button>`) : `<button class="btn lime" type="button" data-up style="padding:9px 12px;font-size:14px">Opgrader</button>`}
+      </div>
+      ${state.pro ? `<div class="terms">
+        <div class="terms-h">Vilkår for Retur Pro</div>
+        <div class="kv"><span>Pris</span><b>29 kr. om måneden inkl. moms</b></div>
+        <div class="kv"><span>Startet</span><b>${since || "I dag"}</b></div>
+        <div class="kv"><span>Binding</span><b>Ingen</b></div>
+        <div class="kv"><span>Opsigelse</span><b>Når som helst, direkte her</b></div>
+        <div class="kv"><span>Efter opsigelse</span><b>Pro til periodens udløb</b></div>
+      </div>` : ""}
       <button class="btn primary block" type="submit">Gem</button>
-      ${state.hasSample ? `<button class="btn ghost block" type="button" data-clear>Ryd eksempeldata</button>` : `<button class="btn ghost block" type="button" data-sample>Indlæs eksempeldata</button>`}
+      <button class="btn ghost block" type="button" data-reset>Slet alle mine data</button>
       <p class="hint" style="margin:0">Dine data gemmes kun i denne browser.</p>
     </form>`, el => {
     $("#setForm", el).addEventListener("submit", e => {
       e.preventDefault();
       const n = v => Math.max(0, Number(String(v).replace(/[^\d,]/g, "").replace(",", ".")) || 0);
-      state.salary = n($("#sSal", el).value); state.savingsGoal = n($("#sGoal", el).value); state.pro = $("#sPro", el).checked;
+      state.salary = n($("#sSal", el).value); state.savingsGoal = n($("#sGoal", el).value);
       save(); closeSheet(); render(); toast("Indstillinger gemt");
     });
-    el.querySelector("[data-clear]")?.addEventListener("click", e => {
+    el.querySelector("[data-up]")?.addEventListener("click", () => openUpgrade());
+    el.querySelector("[data-cancel]")?.addEventListener("click", openCancelPro);
+    el.querySelector("[data-resume]")?.addEventListener("click", () => { state.proEnds = null; save(); closeSheet(); render(); toast("Pro er genoptaget"); });
+    el.querySelector("[data-reset]").addEventListener("click", e => {
       const b = e.currentTarget;
-      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Tryk igen for at rydde"; return; }
-      closeSheet(); clearSample();
-    });
-    el.querySelector("[data-sample]")?.addEventListener("click", () => {
-      const s = sampleState(); state.purchases = [...state.purchases, ...s.purchases]; state.subs = [...state.subs, ...s.subs]; state.hasSample = true;
-      save(); closeSheet(); render(); toast("Eksempeldata indlæst");
+      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Tryk igen for at slette alt"; b.classList.add("danger"); return; }
+      state = freshState(); chatTurns = []; save(); closeSheet(); render(); toast("Alle data er slettet");
     });
   });
+}
+
+/* ================= abonnement: vilkår og opsigelse ================= */
+function editSub(id) {
+  const s = state.subs.find(x => x.id === id); if (!s) return;
+  openForm({ mode: "editsub", data: { id: s.id, store: s.name, amount: s.amount, type: "sub", interval: s.interval, date: iso(nextPayment(s)), bindUntil: s.bindUntil, notice: s.notice, note: s.note } });
+}
+function openSubDetail(id) {
+  const s = state.subs.find(x => x.id === id); if (!s) return;
+  const act = subActive(s);
+  const bound = s.bindUntil && parseISO(s.bindUntil) > today();
+  sheet(`${head(esc(s.name))}
+    <div class="sub-hero"><span class="num">${kr(s.amount)}</span><span>${s.interval === "år" ? "om året" : "om måneden"}</span>
+      ${!act ? `<span class="when">Ophørt</span>` : s.endDate ? `<span class="when stop">Opsagt</span>` : `<span class="when soon">Aktiv</span>`}</div>
+    <div class="terms">
+      <div class="kv"><span>${s.endDate ? "Ophører" : "Næste betaling"}</span><b>${s.endDate ? dkDate(s.endDate) : `${dkDate(iso(nextPayment(s)))} · ${whenText(nextPayment(s)).toLowerCase()}`}</b></div>
+      <div class="kv"><span>Pris pr. år</span><b class="num">${kr(subMonthly(s) * 12)}</b></div>
+      <div class="kv"><span>Binding</span><b>${s.bindUntil ? (bound ? `Til ${dkDate(s.bindUntil)}` : `Udløb ${dkDate(s.bindUntil)}`) : "Ikke angivet"}</b></div>
+      <div class="kv"><span>Opsigelsesvarsel</span><b>${NOTICE[s.notice || "ingen"]}</b></div>
+      ${act && !s.endDate ? `<div class="kv hi"><span>Tidligst ophør</span><b>${dkDate(iso(earliestEnd(s)))}</b></div>` : ""}
+      ${s.note ? `<div class="kv"><span>Note</span><b>${esc(s.note)}</b></div>` : ""}
+    </div>
+    <p class="hint" style="text-align:left;margin:10px 0 16px">Beregnet ud fra de vilkår, du har skrevet. Tjek altid de præcise vilkår hos ${esc(s.name)}.</p>
+    <div class="form">
+      ${act && !s.endDate ? `<button class="btn primary block" data-cancelsub>Opsig abonnement</button>` : ""}
+      ${s.endDate && act ? `<button class="btn lime block" data-undo>Fortryd opsigelse</button>` : ""}
+      <div class="two"><button class="btn ghost block" data-editit>Ret vilkår</button><button class="btn danger block" data-delit>Slet</button></div>
+    </div>`, el => {
+    el.querySelector("[data-cancelsub]")?.addEventListener("click", () => openCancelSub(s.id));
+    el.querySelector("[data-undo]")?.addEventListener("click", () => { s.endDate = null; s.cancelledAt = null; save(); closeSheet(); render(); toast("Opsigelsen er fortrudt"); });
+    el.querySelector("[data-editit]").addEventListener("click", () => editSub(s.id));
+    el.querySelector("[data-delit]").addEventListener("click", e => {
+      const b = e.currentTarget;
+      if (b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Tryk igen"; return; }
+      state.subs = state.subs.filter(x => x.id !== s.id); save(); closeSheet(); render(); toast("Abonnement slettet");
+    });
+  });
+}
+function openCancelSub(id) {
+  const s = state.subs.find(x => x.id === id); if (!s) return;
+  const link = cancelLink(s.name);
+  const url = link || `https://www.google.com/search?q=${encodeURIComponent("opsig " + s.name + " abonnement")}`;
+  const end = earliestEnd(s);
+  sheet(`${head("Opsig " + esc(s.name))}
+    <div class="steps">
+      <div class="step"><span class="n">1</span><div><b>Opsig hos ${esc(s.name)}</b><span>Retur kan ikke opsige hos udbyderen for dig. ${link ? "Knappen åbner deres egen side til opsigelse." : "Knappen søger efter deres side til opsigelse."}</span></div></div>
+      <a class="btn ghost block" href="${url}" target="_blank" rel="noopener noreferrer">${link ? `Åbn ${esc(s.name)}s opsigelse` : `Find opsigelse for ${esc(s.name)}`} ${I.right(16)}</a>
+      <div class="step"><span class="n">2</span><div><b>Bekræft her</b><span>Så stopper Retur med at regne abonnementet med fra ${dkDate(iso(end))} og husker datoen for dig.</span></div></div>
+      <label class="field"><span>Ophører</span><input id="cEnd" type="date" value="${iso(end)}"></label>
+      <button class="btn primary block" data-done>Jeg har opsagt</button>
+    </div>`, el => {
+    el.querySelector("[data-done]").addEventListener("click", async e => {
+      const b = e.currentTarget; b.disabled = true; b.innerHTML = `<span class="spin"></span>`;
+      await sleep(reduced ? 0 : 300);
+      s.cancelledAt = iso(today()); s.endDate = $("#cEnd", el).value || iso(end);
+      save(); closeSheet(); render(); toast(`${s.name} er markeret som opsagt`);
+    });
+  });
+}
+function openCancelPro() {
+  const end = proRenewal();
+  sheet(`${head("Opsig Retur Pro")}
+    <p style="margin:0 0 14px;color:var(--ink-2)">Du beholder Pro til <b>${dkDate(iso(end))}</b>, hvor den betalte periode slutter. Derefter skifter du til Gratis, og der trækkes ikke flere penge.</p>
+    <div class="terms">
+      <div class="kv"><span>Du mister</span><b>Ubegrænset AI, sparemål, løn i procent</b></div>
+      <div class="kv"><span>Du beholder</span><b>Alle dine køb og abonnementer</b></div>
+    </div>
+    <div class="form" style="margin-top:16px">
+      <button class="btn danger block" data-yes>Opsig Pro</button>
+      <button class="btn ghost block" data-x>Behold Pro</button>
+    </div>`, el => {
+    el.querySelector("[data-yes]").addEventListener("click", () => {
+      state.proEnds = iso(end); save(); closeSheet(); render(); toast(`Pro er opsagt. Du har Pro til ${dkDate(iso(end))}`);
+    });
+  });
+}
+
+/* ================= Pro: opgradering og demo-betaling ================= */
+const FEATURES = [
+  ["Overblik over forbrug og abonnementer", true, true],
+  ["Manuel registrering af køb", true, true],
+  ["AI-kvitteringsscanning og AI-chat", "5 om måneden", "Ubegrænset"],
+  ["Løn og forbrug i procent", false, true],
+  ["Sparemål og hvad du har tilbage", false, true],
+  ["Uden reklamer", false, true],
+];
+function openUpgrade(reason) {
+  if (state.pro) { openSettings(); return; }
+  const cell = v => v === true ? `<span class="yes">${I.check(14)}</span>` : v === false ? `<span class="no">–</span>` : `<span class="txt">${v}</span>`;
+  sheet(`${head("Opgrader til Pro")}
+    ${reason ? `<div class="notice" style="margin-bottom:14px">${esc(reason)}</div>` : ""}
+    <div class="price"><span class="amt num">29 kr.</span><span class="per">om måneden</span></div>
+    <p style="margin:4px 0 16px;color:var(--muted);font-size:14px">Opsig når som helst.</p>
+    <div class="cmp">
+      <div class="cmp-h"><span></span><span>Gratis</span><span class="pro">Pro</span></div>
+      ${FEATURES.map(([f, a, b]) => `<div class="cmp-r"><span>${f}</span>${cell(a)}${cell(b)}</div>`).join("")}
+    </div>
+    <button class="btn primary block" data-go style="margin-top:18px">Fortsæt til betaling</button>`,
+    el => el.querySelector("[data-go]").addEventListener("click", openCheckout));
+}
+function openCheckout() {
+  const methods = [["mobilepay", "MobilePay"], ["applepay", "Apple Pay"], ["card", "Betalingskort"]];
+  sheet(`${head("Betaling")}
+    <div class="demo-tag">Demo. Der trækkes ingen penge, og du skal ikke indtaste oplysninger.</div>
+    <div class="order">
+      <div><b>Retur Pro</b><span>Månedligt abonnement</span></div><span class="num">29,00 kr.</span>
+    </div>
+    <div class="order sub"><span>Heraf moms (25 %)</span><span class="num">5,80 kr.</span></div>
+    <div style="font-weight:700;margin:18px 0 10px">Betalingsmetode</div>
+    <div class="methods" role="radiogroup" aria-label="Betalingsmetode">
+      ${methods.map(([k, l], i) => `<label class="radio method"><input type="radio" name="pm" value="${k}" ${i === 0 ? "checked" : ""}> ${l}</label>`).join("")}
+    </div>
+    <button class="btn primary block" id="payBtn" style="margin-top:18px">Betal 29,00 kr. (demo)</button>
+    <p class="hint">Næste betaling ${dkDate(iso(new Date(today().getFullYear(), today().getMonth() + 1, today().getDate())))}. Opsig når som helst under indstillinger.</p>`,
+    el => {
+      $("#payBtn", el).addEventListener("click", async e => {
+        const b = e.currentTarget;
+        const m = el.querySelector("input[name=pm]:checked")?.value;
+        b.disabled = true; b.innerHTML = `<span class="spin"></span> ${m === "mobilepay" ? "Venter på MobilePay" : m === "applepay" ? "Bekræfter med Apple Pay" : "Behandler betaling"}`;
+        await sleep(reduced ? 0 : 1700);
+        if (!$("#payBtn")) return;
+        state.pro = true; state.proSince = iso(today()); state.proEnds = null; save();
+        sheet(`<div class="success">
+            <div class="burst"><span class="ring"></span><span class="tick">${I.check(34)}</span></div>
+            <h3>Velkommen til Retur Pro</h3>
+            <p>Du har nu ubegrænset AI, sparemål, løn i procent og ingen reklamer.</p>
+            <p class="hint" style="margin:0 0 16px">Kvittering for demo-betaling: 29,00 kr.</p>
+            <button class="btn primary block" data-x>Kom i gang</button>
+          </div>`);
+        render();
+      });
+    });
 }
 
 /* ================= toast ================= */
