@@ -65,6 +65,12 @@ export async function callClaude({ system, messages, maxTokens }) {
   const data = await r.json().catch(() => null);
   if (!r.ok) {
     console.error("Claude API fejl", r.status, data && data.error);
+    const msg = String((data && data.error && data.error.message) || "").toLowerCase();
+    // Månedens credits eller udgiftsgrænse er brugt op.
+    if (msg.includes("usage limit") || msg.includes("credit balance") || msg.includes("spend limit") ||
+        (data && data.error && data.error.error_code === "enforced_spend_limit_reached")) {
+      return { error: "quota_reached", status: 402 };
+    }
     return { error: r.status === 429 ? "rate_limited" : r.status === 400 ? "bad_request" : "upstream_error", status: r.status === 429 ? 429 : 502 };
   }
   const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("").trim();
