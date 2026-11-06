@@ -1,0 +1,8 @@
+{
+  "name": "retur",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Retur: køb og abonnementer i ét enkelt overblik.",
+  "engines": { "node": ">=20" }
+}
